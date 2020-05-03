@@ -3226,6 +3226,7 @@ typedef struct
 {
     ma_log_proc logCallback;
     ma_thread_priority threadPriority;
+    ma_uint32 threadStackSize;
     void* pUserData;
     ma_allocation_callbacks allocationCallbacks;
     struct
@@ -3277,6 +3278,7 @@ struct ma_context
     ma_backend backend;                    /* DirectSound, ALSA, etc. */
     ma_log_proc logCallback;
     ma_thread_priority threadPriority;
+    ma_uint32 threadStackSize;
     void* pUserData;
     ma_allocation_callbacks allocationCallbacks;
     ma_mutex deviceEnumLock;               /* Used to make ma_context_get_devices() thread safe. */
@@ -3640,6 +3642,7 @@ struct ma_context
             ma_proc pthread_attr_setschedpolicy;
             ma_proc pthread_attr_getschedparam;
             ma_proc pthread_attr_setschedparam;
+            ma_proc pthread_attr_setstacksize;
         } posix;
 #endif
         int _unused;
@@ -8249,7 +8252,7 @@ static int ma_thread_priority_to_win32(ma_thread_priority priority)
 
 static ma_result ma_thread_create__win32(ma_context* pContext, ma_thread* pThread, ma_thread_entry_proc entryProc, void* pData)
 {
-    pThread->win32.hThread = CreateThread(NULL, 0, entryProc, pData, 0, NULL);
+    pThread->win32.hThread = CreateThread(NULL, pContext->threadStackSize, entryProc, pData, 0, NULL);
     if (pThread->win32.hThread == NULL) {
         return ma_result_from_GetLastError(GetLastError());
     }
@@ -8373,6 +8376,7 @@ typedef int (* ma_pthread_attr_destroy_proc)(pthread_attr_t *attr);
 typedef int (* ma_pthread_attr_setschedpolicy_proc)(pthread_attr_t *attr, int policy);
 typedef int (* ma_pthread_attr_getschedparam_proc)(const pthread_attr_t *attr, struct sched_param *param);
 typedef int (* ma_pthread_attr_setschedparam_proc)(pthread_attr_t *attr, const struct sched_param *param);
+typedef int (* ma_pthread_attr_setstacksize_proc)(pthread_attr_t *attr, size_t stacksize);
 
 static ma_result ma_thread_create__posix(ma_context* pContext, ma_thread* pThread, ma_thread_entry_proc entryProc, void* pData)
 {
@@ -8400,6 +8404,13 @@ static ma_result ma_thread_create__posix(ma_context* pContext, ma_thread* pThrea
         } else {
             scheduler = sched_getscheduler(0);
 #endif
+        }
+        
+        if (pContext->threadStackSize > 0) {
+            if (((ma_pthread_attr_setstacksize_proc)pContext->posix.pthread_attr_setstacksizeparam)(&attr, pContext->threadStackSize) != 0) {
+                ((ma_pthread_attr_destroy_proc)pContext->posix.pthread_attr_destroy)(&attr);
+                return MA_ERROR;
+            }
         }
 
         if (scheduler != -1) {
@@ -29794,6 +29805,7 @@ static ma_result ma_context_init_backend_apis__nix(ma_context* pContext)
     pContext->posix.pthread_attr_setschedpolicy = (ma_proc)ma_dlsym(pContext, pContext->posix.pthreadSO, "pthread_attr_setschedpolicy");
     pContext->posix.pthread_attr_getschedparam  = (ma_proc)ma_dlsym(pContext, pContext->posix.pthreadSO, "pthread_attr_getschedparam");
     pContext->posix.pthread_attr_setschedparam  = (ma_proc)ma_dlsym(pContext, pContext->posix.pthreadSO, "pthread_attr_setschedparam");
+    pContext->posix.pthread_attr_setstacksize   = (ma_proc)ma_dlsym(pContext, pContext->posix.pthreadSO, "pthread_attr_setstacksize");
 #else
     pContext->posix.pthread_create              = (ma_proc)pthread_create;
     pContext->posix.pthread_join                = (ma_proc)pthread_join;
@@ -29811,6 +29823,7 @@ static ma_result ma_context_init_backend_apis__nix(ma_context* pContext)
     pContext->posix.pthread_attr_setschedpolicy = (ma_proc)pthread_attr_setschedpolicy;
     pContext->posix.pthread_attr_getschedparam  = (ma_proc)pthread_attr_getschedparam;
     pContext->posix.pthread_attr_setschedparam  = (ma_proc)pthread_attr_setschedparam;
+    pContext->posix.pthread_attr_setstacksize   = (ma_proc)pthread_attr_setstacksize;
 #endif
 #endif
 
@@ -29879,9 +29892,10 @@ MA_API ma_result ma_context_init(const ma_backend backends[], ma_uint32 backendC
         config = ma_context_config_init();
     }
 
-    pContext->logCallback    = config.logCallback;
-    pContext->threadPriority = config.threadPriority;
-    pContext->pUserData      = config.pUserData;
+    pContext->logCallback     = config.logCallback;
+    pContext->threadPriority  = config.threadPriority;
+    pContext->threadStackSize = config.threadStackSize;
+    pContext->pUserData       = config.pUserData;
 
     result = ma_allocation_callbacks_init_copy(&pContext->allocationCallbacks, &config.allocationCallbacks);
     if (result != MA_SUCCESS) {
